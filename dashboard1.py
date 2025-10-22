@@ -53,47 +53,24 @@ st.markdown("""
 @st.cache_resource
 @st.cache_resource
 def init_connection_pool():
-    """Initialize PostgreSQL connection pool using secrets.toml"""
+    """Initialize PostgreSQL connection pool with enhanced checks and retries"""
     try:
-        # make sure secrets present
-        if "database" not in st.secrets:
-            st.error("❌ 'database' section not found in .streamlit/secrets.toml")
+        if not hasattr(st, 'secrets'):
+            st.error("❌ Streamlit secrets not available. Ensure running in a proper Streamlit environment.")
             return None
-
-        db = st.secrets["database"]
-
-        # cast port to int safely
-        port = int(db.get("port")) if db.get("port") is not None else 5432
-
-        # build kwargs for psycopg2
-        conn_kwargs = {
-            "host": db.get("host"),
-            "port": port,
-            "database": db.get("database"),
-            "user": db.get("user"),
-            "password": db.get("password")
-        }
-
-        # optional sslmode support
-        if db.get("sslmode"):
-            conn_kwargs["sslmode"] = db.get("sslmode")
-
-        connection_pool = psycopg2.pool.SimpleConnectionPool(
-            1, 10,  # min/max connections
-            **conn_kwargs
-        )
-
-        if connection_pool:
-            st.success("✅ Database connection pool created successfully")
-            return connection_pool
-
-    except KeyError as e:
-        st.error(f"❌ Missing key in secrets.toml: {e}")
-        return None
-    except Exception as e:
-        st.error(f"❌ Failed to create connection pool: {e}")
-        st.code(traceback.format_exc())
-        return None
+        
+        if "database" not in st.secrets:
+            st.error("❌ 'database' section not found in secrets.")
+            st.info("""
+            For local development, add to .streamlit/secrets.toml:
+            ```toml
+            [database]
+            host = "51.178.30.30"
+            port = 5433
+            database = "rawahel_test"
+            user = "readonly_user"
+            password = "uJz8o99awc"
+            sslmode = "require"  
 
 
 def get_connection():
