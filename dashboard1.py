@@ -51,72 +51,50 @@ st.markdown("""
 
 # Initialize connection pool
 @st.cache_resource
+@st.cache_resource
 def init_connection_pool():
-    """Initialize PostgreSQL connection pool"""
+    """Initialize PostgreSQL connection pool using secrets.toml"""
     try:
-        # First, verify secrets are loaded
-        if not hasattr(st, 'secrets'):
-            st.error("❌ Streamlit secrets not available")
-            return None
-        
-        # Check if database section exists
+        # make sure secrets present
         if "database" not in st.secrets:
-            st.error("❌ 'database' section not found in secrets.toml")
-            st.info("""
-            Please ensure your `.streamlit/secrets.toml` file contains:
-            ```toml
-            [database]
-            host = "your-host"
-            port = "5432"
-            database = "your-database"
-            user = "your-user"
-            password = "your-password"
-            ```
-            """)
+            st.error("❌ 'database' section not found in .streamlit/secrets.toml")
             return None
-        
-        # Verify all required keys exist
-        required_keys = ["host", "port", "database", "user", "password"]
-        missing_keys = [key for key in required_keys if key not in st.secrets["database"]]
-        
-        if missing_keys:
-            st.error(f"❌ Missing required keys in secrets.toml: {', '.join(missing_keys)}")
-            return None
-        
-        # Display connection info (safely, without password)
-        with st.expander("🔍 Database Connection Info"):
-            st.write(f"**Host:** {st.secrets['database']['host']}")
-            st.write(f"**Port:** {st.secrets['database']['port']}")
-            st.write(f"**Database:** {st.secrets['database']['database']}")
-            st.write(f"**User:** {st.secrets['database']['user']}")
-            st.write(f"**Password:** {'*' * len(str(st.secrets['database']['password']))}")
-        
-        # Create connection pool
+
+        db = st.secrets["database"]
+
+        # cast port to int safely
+        port = int(db.get("port")) if db.get("port") is not None else 5432
+
+        # build kwargs for psycopg2
+        conn_kwargs = {
+            "host": db.get("host"),
+            "port": port,
+            "database": db.get("database"),
+            "user": db.get("user"),
+            "password": db.get("password")
+        }
+
+        # optional sslmode support
+        if db.get("sslmode"):
+            conn_kwargs["sslmode"] = db.get("sslmode")
+
         connection_pool = psycopg2.pool.SimpleConnectionPool(
-            1, 10,  # min and max connections
-            host=st.secrets["database"]["host"],
-            port=st.secrets["database"]["port"],
-            database=st.secrets["database"]["database"],
-            user=st.secrets["database"]["user"],
-            password=st.secrets["database"]["password"]
+            1, 10,  # min/max connections
+            **conn_kwargs
         )
-        
+
         if connection_pool:
             st.success("✅ Database connection pool created successfully")
             return connection_pool
-            
+
     except KeyError as e:
-        st.error(f"❌ Missing configuration key: {e}")
-        st.info("Please check your .streamlit/secrets.toml file structure")
-        return None
-    except psycopg2.OperationalError as e:
-        st.error(f"❌ Database connection failed: {e}")
-        st.info("Please verify your database credentials and network connectivity")
+        st.error(f"❌ Missing key in secrets.toml: {e}")
         return None
     except Exception as e:
-        st.error(f"❌ Unexpected error creating connection pool: {e}")
+        st.error(f"❌ Failed to create connection pool: {e}")
         st.code(traceback.format_exc())
         return None
+
 
 def get_connection():
     """Get a connection from the pool"""
