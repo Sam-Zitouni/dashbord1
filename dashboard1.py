@@ -439,6 +439,43 @@ def main():
             st.write("**Database Section Exists:**", "database" in st.secrets)
             if "database" in st.secrets:
                 st.write("**Available Keys:**", list(st.secrets["database"].keys()))
+                st.write("---")
+                st.write("**Configuration Values:**")
+                st.code(f"""
+Host: {st.secrets["database"]["host"]}
+Port: {st.secrets["database"]["port"]}
+Database: {st.secrets["database"]["database"]}
+User: {st.secrets["database"]["user"]}
+Password: {'*' * len(str(st.secrets["database"]["password"]))} ({len(str(st.secrets["database"]["password"]))} characters)
+                """)
+                
+                # Test connection
+                st.write("**Testing Connection...**")
+                try:
+                    test_conn = psycopg2.connect(
+                        host=st.secrets["database"]["host"],
+                        port=st.secrets["database"]["port"],
+                        database=st.secrets["database"]["database"],
+                        user=st.secrets["database"]["user"],
+                        password=st.secrets["database"]["password"]
+                    )
+                    st.success("✅ Direct connection test SUCCESSFUL!")
+                    
+                    # Try a simple query
+                    cursor = test_conn.cursor()
+                    cursor.execute("SELECT version();")
+                    version = cursor.fetchone()
+                    st.write(f"**PostgreSQL Version:** {version[0]}")
+                    
+                    cursor.execute("SELECT current_database();")
+                    db = cursor.fetchone()
+                    st.write(f"**Connected to Database:** {db[0]}")
+                    
+                    cursor.close()
+                    test_conn.close()
+                except Exception as e:
+                    st.error(f"❌ Connection test FAILED: {e}")
+                    st.code(traceback.format_exc())
         st.markdown("---")
     
     # Sidebar filters
