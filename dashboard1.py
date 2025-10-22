@@ -1,815 +1,171 @@
 import streamlit as st
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime, timedelta
-import numpy as np
 import psycopg2
 from psycopg2 import pool
+import pandas as pd
 import traceback
 
-# Page configuration
+# ----------------------------------------------------
+# 1️⃣ APP CONFIGURATION
+# ----------------------------------------------------
 st.set_page_config(
-    page_title="Director Dashboard",
-    page_icon="🚌",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    page_title="Rawahel Agency Dashboard",
+    page_icon="🧭",
+    layout="wide"
 )
+st.title("🧭 Rawahel Agency Dashboard")
+st.caption("Real-time insights powered by PostgreSQL")
 
-# Custom CSS for better styling
-st.markdown("""
-<style>
-    .metric-card {
-        background: white;
-        padding: 20px;
-        border-radius: 10px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
-    .big-font {
-        font-size: 48px !important;
-        font-weight: bold;
-    }
-    .status-badge {
-        background: #000;
-        color: white;
-        padding: 4px 12px;
-        border-radius: 20px;
-        font-size: 12px;
-    }
-    .progress-bar {
-        height: 8px;
-        background: #e0e0e0;
-        border-radius: 4px;
-        overflow: hidden;
-    }
-    .progress-fill {
-        height: 100%;
-        background: #000;
-    }
-</style>
-""", unsafe_allow_html=True)
+# ----------------------------------------------------
+# 2️⃣ LOAD DATABASE CONFIG FROM SECRETS
+# ----------------------------------------------------
+try:
+    db_config = st.secrets["database"]
+    st.success("✅ Secrets loaded successfully.")
+except Exception:
+    st.error("❌ Database configuration not found in `.streamlit/secrets.toml`.")
+    st.info("Make sure your `.streamlit/secrets.toml` file contains a [database] section.")
+    st.stop()
 
-# Initialize connection pool
+# ----------------------------------------------------
+# 3️⃣ INITIALIZE CONNECTION POOL
+# ----------------------------------------------------
 @st.cache_resource
 def init_connection_pool():
-    """Initialize PostgreSQL connection pool"""
     try:
-        # First, verify secrets are loaded
-        if not hasattr(st, 'secrets'):
-            st.error("❌ Streamlit secrets not available")
-            return None
-        
-        # Check if database section exists
-        if "database" not in st.secrets:
-            st.error("❌ 'database' section not found in secrets.toml")
-            st.info("""
-            Please ensure your `.streamlit/secrets.toml` file contains:
-            ```toml
-            [database]
-            host = "your-host"
-            port = "5432"
-            database = "your-database"
-            user = "your-user"
-            password = "your-password"
-            ```
-            """)
-            return None
-        
-        # Verify all required keys exist
-        required_keys = ["host", "port", "database", "user", "password"]
-        missing_keys = [key for key in required_keys if key not in st.secrets["database"]]
-        
-        if missing_keys:
-            st.error(f"❌ Missing required keys in secrets.toml: {', '.join(missing_keys)}")
-            return None
-        
-        # Display connection info (safely, without password)
-        with st.expander("🔍 Database Connection Info"):
-            st.write(f"**Host:** {st.secrets['database']['host']}")
-            st.write(f"**Port:** {st.secrets['database']['port']}")
-            st.write(f"**Database:** {st.secrets['database']['database']}")
-            st.write(f"**User:** {st.secrets['database']['user']}")
-            st.write(f"**Password:** {'*' * len(str(st.secrets['database']['password']))}")
-        
-        # Create connection pool
-        connection_pool = psycopg2.pool.SimpleConnectionPool(
-            1, 10,  # min and max connections
-            host=st.secrets["database"]["host"],
-            port=st.secrets["database"]["port"],
-            database=st.secrets["database"]["database"],
-            user=st.secrets["database"]["user"],
-            password=st.secrets["database"]["password"]
+        connection_pool = pool.SimpleConnectionPool(
+            1, 10,
+            host=db_config.get("host"),
+            port=db_config.get("port"),
+            database=db_config.get("database"),
+            user=db_config.get("user"),
+            password=db_config.get("password")
         )
-        
         if connection_pool:
-            st.success("✅ Database connection pool created successfully")
-            return connection_pool
-            
-    except KeyError as e:
-        st.error(f"❌ Missing configuration key: {e}")
-        st.info("Please check your .streamlit/secrets.toml file structure")
-        return None
-    except psycopg2.OperationalError as e:
-        st.error(f"❌ Database connection failed: {e}")
-        st.info("Please verify your database credentials and network connectivity")
-        return None
+            st.success("✅ Database connection pool created successfully.")
+        return connection_pool
     except Exception as e:
-        st.error(f"❌ Unexpected error creating connection pool: {e}")
-        st.code(traceback.format_exc())
+        st.error(f"❌ Failed to create connection pool: {e}")
+        st.text(traceback.format_exc())
         return None
 
-def get_connection():
-    """Get a connection from the pool"""
-    pool = init_connection_pool()
-    if pool:
-        try:
-            return pool.getconn()
-        except Exception as e:
-            st.error(f"Failed to get connection: {e}")
-            return None
-    return None
+connection_pool = init_connection_pool()
+if not connection_pool:
+    st.stop()
 
-def return_connection(conn):
-    """Return connection to pool"""
-    pool = init_connection_pool()
-    if pool and conn:
-        pool.putconn(conn)
-
-# Data fetching functions with error handling
-def fetch_bookings_data(date_range):
-    """Fetch bookings data with all statuses"""
-    conn = get_connection()
-    if not conn:
-        return pd.DataFrame()
-    
+# ----------------------------------------------------
+# 4️⃣ DATABASE QUERY FUNCTION
+# ----------------------------------------------------
+def run_query(query):
+    conn = None
     try:
-        query = f"""
-        SELECT 
-            b.id,
-            b.created_at,
-            b.status,
-            b.total_amount,
-            b.route_id,
-            b.agency_id,
-            b.customer_id,
-            COALESCE(b.source, 'direct') as booking_source,
-            r.name as route_name,
-            a.name as agency_name
-        FROM bookings b
-        LEFT JOIN routes r ON b.route_id = r.id
-        LEFT JOIN agencies a ON b.agency_id = a.id
-        WHERE b.created_at >= '{date_range[0]}' 
-        AND b.created_at <= '{date_range[1]}'
-        """
-        df = pd.read_sql(query, conn)
+        conn = connection_pool.getconn()
+        cur = conn.cursor()
+        cur.execute(query)
+        rows = cur.fetchall()
+        columns = [desc[0] for desc in cur.description]
+        cur.close()
+        df = pd.DataFrame(rows, columns=columns)
         return df
     except Exception as e:
-        st.error(f"Error fetching bookings: {e}")
+        st.error(f"❌ Query failed: {e}")
+        st.text(traceback.format_exc())
         return pd.DataFrame()
     finally:
-        return_connection(conn)
-
-def fetch_trip_costs(date_range):
-    """Fetch all trip costs by type"""
-    conn = get_connection()
-    if not conn:
-        return pd.DataFrame()
-    
-    try:
-        query = f"""
-        SELECT 
-            route_id,
-            type as cost_type,
-            amount,
-            date,
-            agent_id
-        FROM trip_cost_reports
-        WHERE date >= '{date_range[0]}' 
-        AND date <= '{date_range[1]}'
-        """
-        df = pd.read_sql(query, conn)
-        return df
-    except Exception as e:
-        st.error(f"Error fetching trip costs: {e}")
-        return pd.DataFrame()
-    finally:
-        return_connection(conn)
-
-def fetch_payroll_costs(date_range):
-    """Fetch salary costs"""
-    conn = get_connection()
-    if not conn:
-        return pd.DataFrame()
-    
-    try:
-        query = f"""
-        SELECT 
-            amount,
-            date,
-            type
-        FROM payrolls
-        WHERE date >= '{date_range[0]}' 
-        AND date <= '{date_range[1]}'
-        """
-        df = pd.read_sql(query, conn)
-        return df
-    except Exception as e:
-        st.warning(f"Note: Payroll data not available")
-        return pd.DataFrame()
-    finally:
-        return_connection(conn)
-
-def fetch_agency_commissions(date_range):
-    """Fetch agency commission data"""
-    conn = get_connection()
-    if not conn:
-        return pd.DataFrame()
-    
-    try:
-        query = f"""
-        SELECT 
-            ar.agency_id,
-            a.name as agency_name,
-            SUM(ar.credit) as total_commission,
-            ar.date
-        FROM agency_reports ar
-        LEFT JOIN agencies a ON ar.agency_id = a.id
-        WHERE ar.date >= '{date_range[0]}' 
-        AND ar.date <= '{date_range[1]}'
-        GROUP BY ar.agency_id, a.name, ar.date
-        """
-        df = pd.read_sql(query, conn)
-        return df
-    except Exception as e:
-        st.warning(f"Note: Commission data not available")
-        return pd.DataFrame()
-    finally:
-        return_connection(conn)
-
-def fetch_fleet_utilization(date_range):
-    """Fetch fleet utilization data"""
-    conn = get_connection()
-    if not conn:
-        return pd.DataFrame()
-    
-    try:
-        query = f"""
-        SELECT 
-            date,
-            vehicles_on,
-            vehicles_off,
-            done_trips,
-            all_trips
-        FROM management_reports
-        WHERE date >= '{date_range[0]}' 
-        AND date <= '{date_range[1]}'
-        """
-        df = pd.read_sql(query, conn)
-        return df
-    except Exception as e:
-        st.warning(f"Note: Fleet utilization data not available")
-        return pd.DataFrame()
-    finally:
-        return_connection(conn)
-
-def fetch_routes_with_distance():
-    """Fetch route information"""
-    conn = get_connection()
-    if not conn:
-        return pd.DataFrame()
-    
-    try:
-        query = """
-        SELECT 
-            r.id as route_id,
-            r.name as route_name,
-            COALESCE(SUM(rs.distance_km), 100) as total_distance_km
-        FROM routes r
-        LEFT JOIN route_segments rs ON r.id = rs.route_id
-        GROUP BY r.id, r.name
-        """
-        df = pd.read_sql(query, conn)
-        return df
-    except Exception as e:
-        st.warning(f"Note: Route distance data not available")
-        return pd.DataFrame()
-    finally:
-        return_connection(conn)
-
-def fetch_customer_retention_data(date_range):
-    """Fetch customer booking history"""
-    conn = get_connection()
-    if not conn:
-        return pd.DataFrame()
-    
-    try:
-        query = f"""
-        SELECT 
-            c.id as customer_id,
-            c.created_at as customer_since,
-            COUNT(DISTINCT b.id) as total_bookings,
-            MIN(b.created_at) as first_booking,
-            MAX(b.created_at) as last_booking
-        FROM customers c
-        LEFT JOIN bookings b ON c.id = b.customer_id
-        WHERE b.created_at <= '{date_range[1]}'
-        GROUP BY c.id, c.created_at
-        """
-        df = pd.read_sql(query, conn)
-        return df
-    except Exception as e:
-        st.warning(f"Note: Customer retention data not available")
-        return pd.DataFrame()
-    finally:
-        return_connection(conn)
-
-# Calculation functions
-def calculate_gross_revenue(bookings_df):
-    """Calculate gross revenue from paid/boarded bookings"""
-    if bookings_df.empty:
-        return 0
-    paid_statuses = ['paid', 'boarded', 'confirmed', 'completed']
-    revenue_bookings = bookings_df[bookings_df['status'].str.lower().isin(paid_statuses)]
-    return revenue_bookings['total_amount'].sum()
-
-def calculate_total_costs(trip_costs_df, payroll_df):
-    """Calculate total operational costs"""
-    trip_costs = trip_costs_df['amount'].sum() if not trip_costs_df.empty else 0
-    salary_costs = payroll_df['amount'].sum() if not payroll_df.empty else 0
-    return trip_costs + salary_costs
-
-def calculate_net_profit(gross_revenue, total_costs):
-    """Calculate net profit"""
-    return gross_revenue - total_costs
-
-def calculate_commission_cost(bookings_df, commission_df):
-    """Calculate total commission cost"""
-    if not commission_df.empty:
-        return commission_df['total_commission'].sum()
-    # Fallback: estimate 10% of revenue
-    return bookings_df['total_amount'].sum() * 0.10 if not bookings_df.empty else 0
-
-def calculate_rask(revenue, bookings_df, routes_df):
-    """Calculate Revenue per Available Seat Kilometer"""
-    if bookings_df.empty or routes_df.empty or revenue == 0:
-        return 0
-    
-    # Merge bookings with routes to get distances
-    bookings_with_routes = bookings_df.merge(routes_df, on='route_id', how='left')
-    
-    # Assume average 40 seats per bus
-    avg_seats_per_bus = 40
-    total_seat_km = (bookings_with_routes['total_distance_km'].fillna(100) * avg_seats_per_bus).sum()
-    
-    if total_seat_km > 0:
-        return revenue / total_seat_km
-    return 0
-
-def calculate_fleet_utilization(fleet_df):
-    """Calculate fleet utilization percentage"""
-    if fleet_df.empty:
-        return 0
-    
-    total_done_trips = fleet_df['done_trips'].sum()
-    total_all_trips = fleet_df['all_trips'].sum()
-    
-    if total_all_trips > 0:
-        return (total_done_trips / total_all_trips) * 100
-    return 0
-
-def calculate_customer_retention(customer_df, date_range):
-    """Calculate customer retention rate"""
-    if customer_df.empty:
-        return 0
-    
-    period_start = pd.to_datetime(date_range[0])
-    period_end = pd.to_datetime(date_range[1])
-    
-    # Convert date columns
-    customer_df['first_booking'] = pd.to_datetime(customer_df['first_booking'])
-    customer_df['last_booking'] = pd.to_datetime(customer_df['last_booking'])
-    customer_df['customer_since'] = pd.to_datetime(customer_df['customer_since'])
-    
-    # Customers at start of period
-    customers_at_start = customer_df[customer_df['first_booking'] < period_start]
-    
-    # Customers who booked again in this period
-    retained_customers = customers_at_start[
-        customers_at_start['last_booking'] >= period_start
-    ]
-    
-    if len(customers_at_start) > 0:
-        return (len(retained_customers) / len(customers_at_start)) * 100
-    return 0
-
-def calculate_booking_conversion(bookings_df):
-    """Calculate booking conversion rate"""
-    if bookings_df.empty:
-        return 0
-    
-    total_bookings = len(bookings_df)
-    paid_statuses = ['paid', 'boarded', 'confirmed', 'completed']
-    paid_bookings = len(bookings_df[bookings_df['status'].str.lower().isin(paid_statuses)])
-    
-    if total_bookings > 0:
-        return (paid_bookings / total_bookings) * 100
-    return 0
-
-def calculate_previous_period_data(date_range):
-    """Fetch data from previous period for comparison"""
-    days_diff = (pd.to_datetime(date_range[1]) - pd.to_datetime(date_range[0])).days
-    prev_start = (pd.to_datetime(date_range[0]) - timedelta(days=days_diff)).strftime('%Y-%m-%d')
-    prev_end = (pd.to_datetime(date_range[0]) - timedelta(days=1)).strftime('%Y-%m-%d')
-    
-    prev_bookings = fetch_bookings_data((prev_start, prev_end))
-    prev_revenue = calculate_gross_revenue(prev_bookings)
-    
-    return prev_revenue
-
-# Main Dashboard
-def main():
-    st.title("🚌 Director Dashboard")
-    st.caption("Real-time business intelligence for strategic decision-making")
-    
-    # Debug: Check if secrets are loaded
-    if st.checkbox("🔧 Show Debug Info", value=False):
-        st.subheader("Debug Information")
-        st.write("**Secrets Available:**", hasattr(st, 'secrets'))
-        if hasattr(st, 'secrets'):
-            st.write("**Database Section Exists:**", "database" in st.secrets)
-            if "database" in st.secrets:
-                st.write("**Available Keys:**", list(st.secrets["database"].keys()))
-                st.write("---")
-                st.write("**Configuration Values:**")
-                st.code(f"""
-Host: {st.secrets["database"]["host"]}
-Port: {st.secrets["database"]["port"]}
-Database: {st.secrets["database"]["database"]}
-User: {st.secrets["database"]["user"]}
-Password: {'*' * len(str(st.secrets["database"]["password"]))} ({len(str(st.secrets["database"]["password"]))} characters)
-                """)
-                
-                # Test connection
-                st.write("**Testing Connection...**")
-                try:
-                    test_conn = psycopg2.connect(
-                        host=st.secrets["database"]["host"],
-                        port=st.secrets["database"]["port"],
-                        database=st.secrets["database"]["database"],
-                        user=st.secrets["database"]["user"],
-                        password=st.secrets["database"]["password"]
-                    )
-                    st.success("✅ Direct connection test SUCCESSFUL!")
-                    
-                    # Try a simple query
-                    cursor = test_conn.cursor()
-                    cursor.execute("SELECT version();")
-                    version = cursor.fetchone()
-                    st.write(f"**PostgreSQL Version:** {version[0]}")
-                    
-                    cursor.execute("SELECT current_database();")
-                    db = cursor.fetchone()
-                    st.write(f"**Connected to Database:** {db[0]}")
-                    
-                    cursor.close()
-                    test_conn.close()
-                except Exception as e:
-                    st.error(f"❌ Connection test FAILED: {e}")
-                    st.code(traceback.format_exc())
-        st.markdown("---")
-    
-    # Sidebar filters
-    with st.sidebar:
-        st.header("⚙️ Dashboard Controls")
-        
-        # Date range selector
-        st.subheader("📅 Time Period")
-        period_options = {
-            "Last 30 Days": 30,
-            "Last 60 Days": 60,
-            "Last 90 Days": 90,
-            "Last Year": 365,
-            "Custom Range": 0
-        }
-        
-        selected_period = st.selectbox("Select Period", list(period_options.keys()))
-        
-        if selected_period == "Custom Range":
-            col1, col2 = st.columns(2)
-            with col1:
-                start_date = st.date_input("Start Date", datetime.now() - timedelta(days=30))
-            with col2:
-                end_date = st.date_input("End Date", datetime.now())
-            date_range = (start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
-        else:
-            days = period_options[selected_period]
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=days)
-            date_range = (start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
-        
-        st.info(f"📊 Analyzing: {date_range[0]} to {date_range[1]}")
-        
-        # Additional filters
-        st.subheader("🎯 Filters")
-        show_cancelled = st.checkbox("Include Cancelled Bookings", value=False)
-        currency = st.selectbox("Currency", ["TND", "USD", "EUR"], index=0)
-        
-        st.markdown("---")
-        st.subheader("🔄 Data Refresh")
-        if st.button("🔄 Refresh Dashboard", use_container_width=True):
-            st.cache_data.clear()
-            st.rerun()
-    
-    # Test database connection
-    with st.spinner("🔌 Connecting to database..."):
-        conn = get_connection()
         if conn:
-            st.success("✅ Connected to database successfully", icon="✅")
-            return_connection(conn)
-        else:
-            st.error("❌ Cannot connect to database. Check your secrets.toml configuration.")
-            st.stop()
-    
-    # Fetch data with loading indicators
-    with st.spinner("📊 Loading dashboard data..."):
-        bookings_df = fetch_bookings_data(date_range)
-        trip_costs_df = fetch_trip_costs(date_range)
-        payroll_df = fetch_payroll_costs(date_range)
-        commission_df = fetch_agency_commissions(date_range)
-        fleet_df = fetch_fleet_utilization(date_range)
-        routes_df = fetch_routes_with_distance()
-        customer_df = fetch_customer_retention_data(date_range)
-    
-    # Check if we have data
-    if bookings_df.empty:
-        st.warning("⚠️ No booking data found for the selected period. Please adjust your date range.")
-        st.stop()
-    
-    # Calculate KPIs
-    gross_revenue = calculate_gross_revenue(bookings_df)
-    total_costs = calculate_total_costs(trip_costs_df, payroll_df)
-    net_profit = calculate_net_profit(gross_revenue, total_costs)
-    commission_cost = calculate_commission_cost(bookings_df, commission_df)
-    rask = calculate_rask(gross_revenue, bookings_df, routes_df)
-    fleet_utilization = calculate_fleet_utilization(fleet_df)
-    customer_retention = calculate_customer_retention(customer_df, date_range)
-    booking_conversion = calculate_booking_conversion(bookings_df)
-    
-    # Calculate ROFA (Return on Fleet Assets)
-    # Assume total fleet value is 20x monthly revenue (adjust as needed)
-    total_fleet_value = gross_revenue * 20 if gross_revenue > 0 else 1000000
-    rofa = (net_profit / total_fleet_value) * 100 if total_fleet_value > 0 else 0
-    
-    # Previous period comparison
-    prev_revenue = calculate_previous_period_data(date_range)
-    revenue_change = ((gross_revenue - prev_revenue) / prev_revenue * 100) if prev_revenue > 0 else 0
-    
-    # Top KPI Cards - Row 1
-    st.subheader("")
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric(
-            label="💰 Gross Revenue",
-            value=f"{gross_revenue:,.0f} {currency}",
-            delta=f"{revenue_change:+.1f}% from last period"
-        )
-    
-    with col2:
-        st.metric(
-            label="📈 Net Profit",
-            value=f"{net_profit:,.0f} {currency}",
-            delta=f"{(net_profit/gross_revenue*100):.1f}% margin" if gross_revenue > 0 else "N/A"
-        )
-    
-    with col3:
-        st.metric(
-            label="💸 Commission Cost",
-            value=f"{commission_cost:,.0f} {currency}",
-            delta=f"{(commission_cost/gross_revenue*100):.1f}% of revenue" if gross_revenue > 0 else "N/A"
-        )
-    
-    with col4:
-        st.metric(
-            label="🎯 RASK",
-            value=f"{rask:.2f} {currency}/km",
-            delta="Revenue per Seat-KM"
-        )
-    
-    # Performance Metrics - Row 2
-    st.markdown("<br>", unsafe_allow_html=True)
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.markdown("### 🚌 Fleet Utilization")
-        st.markdown(f"<h1 style='margin:0;'>{fleet_utilization:.0f}%</h1>", unsafe_allow_html=True)
-        st.caption("Target: 85%")
-        status = "On Track" if fleet_utilization >= 85 else "Below Target"
-        st.markdown(f"<span class='status-badge'>{status}</span>", unsafe_allow_html=True)
-        st.progress(min(fleet_utilization / 100, 1.0))
-    
-    with col2:
-        st.markdown("### 💎 ROFA")
-        st.markdown(f"<h1 style='margin:0;'>{rofa:.1f}%</h1>", unsafe_allow_html=True)
-        st.caption("Target: 20%")
-        status = "On Track" if rofa >= 20 else "Below Target"
-        st.markdown(f"<span class='status-badge'>{status}</span>", unsafe_allow_html=True)
-        st.progress(min(rofa / 100, 1.0))
-    
-    with col3:
-        st.markdown("### 🎯 Customer Retention")
-        st.markdown(f"<h1 style='margin:0;'>{customer_retention:.0f}%</h1>", unsafe_allow_html=True)
-        st.caption("Target: 75%")
-        status = "On Track" if customer_retention >= 75 else "Below Target"
-        st.markdown(f"<span class='status-badge'>{status}</span>", unsafe_allow_html=True)
-        st.progress(min(customer_retention / 100, 1.0))
-    
-    with col4:
-        st.markdown("### 📊 Booking Conversion")
-        st.markdown(f"<h1 style='margin:0;'>{booking_conversion:.0f}%</h1>", unsafe_allow_html=True)
-        st.caption("Target: 60%")
-        status = "On Track" if booking_conversion >= 60 else "Below Target"
-        st.markdown(f"<span class='status-badge'>{status}</span>", unsafe_allow_html=True)
-        st.progress(min(booking_conversion / 100, 1.0))
-    
-    # Quick Actions
-    st.markdown("<br><br>", unsafe_allow_html=True)
-    st.subheader("⚡ Quick Actions")
-    st.caption("Frequently used operations")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("📊 Explore Route Analytics", use_container_width=True, type="primary"):
-            st.info("🚀 Route analytics page coming soon!")
-    
-    with col2:
-        if st.button("⬇️ Download Report", use_container_width=True):
-            # Create downloadable CSV
-            report_data = {
-                'Metric': ['Gross Revenue', 'Net Profit', 'Commission Cost', 'RASK', 'Fleet Utilization', 'Customer Retention', 'Booking Conversion'],
-                'Value': [gross_revenue, net_profit, commission_cost, rask, fleet_utilization, customer_retention, booking_conversion]
-            }
-            report_df = pd.DataFrame(report_data)
-            csv = report_df.to_csv(index=False)
-            st.download_button(
-                label="📥 Download CSV",
-                data=csv,
-                file_name=f"director_report_{date_range[1]}.csv",
-                mime="text/csv"
-            )
-    
-    # Charts Section
-    st.markdown("<br>", unsafe_allow_html=True)
-    col1, col2 = st.columns([6, 4])
-    
-    with col1:
-        st.subheader("📈 Monthly Performance Trends")
-        st.caption("Bookings vs Revenue vs Costs")
-        
-        # Generate monthly data
-        monthly_data = bookings_df.copy()
-        monthly_data['month'] = pd.to_datetime(monthly_data['created_at']).dt.to_period('M')
-        monthly_summary = monthly_data.groupby('month').agg({
-            'id': 'count',
-            'total_amount': 'sum'
-        }).reset_index()
-        monthly_summary['month'] = monthly_summary['month'].astype(str)
-        
-        # Add costs (merge with trip costs by month)
-        if not trip_costs_df.empty:
-            trip_costs_df['month'] = pd.to_datetime(trip_costs_df['date']).dt.to_period('M').astype(str)
-            monthly_costs = trip_costs_df.groupby('month')['amount'].sum().reset_index()
-            monthly_summary = monthly_summary.merge(monthly_costs, on='month', how='left')
-            monthly_summary['amount'] = monthly_summary['amount'].fillna(0)
-        else:
-            monthly_summary['amount'] = monthly_summary['total_amount'] * 0.7
-        
-        monthly_summary.columns = ['month', 'bookings', 'revenue', 'costs']
-        
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=monthly_summary['month'],
-            y=monthly_summary['bookings'],
-            name='Bookings',
-            mode='lines+markers',
-            line=dict(color='#3b82f6', width=3),
-            marker=dict(size=8)
-        ))
-        fig.add_trace(go.Scatter(
-            x=monthly_summary['month'],
-            y=monthly_summary['revenue'],
-            name='Revenue',
-            mode='lines+markers',
-            line=dict(color='#10b981', width=3),
-            marker=dict(size=8),
-            yaxis='y2'
-        ))
-        fig.add_trace(go.Scatter(
-            x=monthly_summary['month'],
-            y=monthly_summary['costs'],
-            name='Costs',
-            mode='lines+markers',
-            line=dict(color='#ef4444', width=3),
-            marker=dict(size=8),
-            yaxis='y2'
-        ))
-        
-        fig.update_layout(
-            height=400,
-            hovermode='x unified',
-            xaxis=dict(title='Month', showgrid=True),
-            yaxis=dict(title='Number of Bookings', side='left', showgrid=True),
-            yaxis2=dict(title=f'Amount ({currency})', overlaying='y', side='right', showgrid=False),
-            legend=dict(orientation='h', y=1.15, x=0),
-            margin=dict(l=0, r=0, t=40, b=0),
-            plot_bgcolor='rgba(0,0,0,0)',
-            paper_bgcolor='rgba(0,0,0,0)'
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    
-    with col2:
-        st.subheader("🎯 Booking Sources")
-        st.caption("Revenue distribution by channel")
-        
-        # Booking sources analysis
-        if 'booking_source' in bookings_df.columns:
-            source_data = bookings_df[bookings_df['status'].str.lower().isin(['paid', 'boarded', 'confirmed'])].groupby('booking_source')['total_amount'].sum().reset_index()
-            source_data.columns = ['source', 'revenue']
-            
-            fig = px.pie(
-                source_data,
-                values='revenue',
-                names='source',
-                color_discrete_sequence=px.colors.qualitative.Set3,
-                hole=0.4
-            )
-            fig.update_layout(
-                height=400,
-                margin=dict(l=0, r=0, t=0, b=0),
-                showlegend=True,
-                legend=dict(orientation='v', y=0.5)
-            )
-            fig.update_traces(textposition='inside', textinfo='percent+label', textfont_size=14)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Booking source data not available")
-    
-    # Top Performing Agencies
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.subheader("🏆 Top Performing Agencies")
-    st.caption("Turnover and growth vs last period - Click for details")
-    
-    # Calculate agency performance
-    if 'agency_name' in bookings_df.columns and bookings_df['agency_name'].notna().any():
-        agency_bookings = bookings_df[
-            (bookings_df['status'].str.lower().isin(['paid', 'boarded', 'confirmed'])) &
-            (bookings_df['agency_name'].notna())
-        ]
-        
-        agency_performance = agency_bookings.groupby('agency_name').agg({
-            'total_amount': 'sum',
-            'id': 'count',
-            'status': lambda x: (x.str.lower() == 'cancelled').sum()
-        }).reset_index()
-        agency_performance.columns = ['agency_name', 'revenue', 'trips', 'cancellations']
-        agency_performance = agency_performance.sort_values('revenue', ascending=False).head(5)
-        
-        # Calculate commission (10% of revenue)
-        agency_performance['commission'] = agency_performance['revenue'] * 0.10
-        
-        # Simulate growth (in real app, compare with previous period)
-        agency_performance['growth'] = np.random.uniform(5, 20, len(agency_performance))
-        
-        for idx, row in agency_performance.iterrows():
-            with st.container():
-                col1, col2, col3 = st.columns([1, 6, 3])
-                
-                with col1:
-                    rank = list(agency_performance.index).index(idx) + 1
-                    st.markdown(
-                        f"<div style='background:#000;color:white;width:50px;height:50px;border-radius:50%;"
-                        f"display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:bold;'>"
-                        f"{rank}</div>",
-                        unsafe_allow_html=True
-                    )
-                
-                with col2:
-                    st.markdown(f"### {row['agency_name']} →")
-                    st.caption(f"{int(row['trips'])} trips • {int(row['cancellations'])} cancellations")
-                
-                with col3:
-                    st.markdown(f"<h3 style='text-align:right;margin:0;'>{row['revenue']:,.0f} {currency}</h3>", unsafe_allow_html=True)
-                    st.markdown(f"<p style='text-align:right;color:#10b981;margin:0;'>+{row['growth']:.1f}% vs last period</p>", unsafe_allow_html=True)
-                    st.caption(f"Commission: {row['commission']:,.0f} {currency}")
-                
-                st.markdown("<hr style='margin:10px 0;'>", unsafe_allow_html=True)
-    else:
-        st.info("No agency data available for the selected period")
-    
-    # Footer
-    st.markdown("<br><br>", unsafe_allow_html=True)
-    st.markdown("---")
-    st.caption(f"📊 Dashboard last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Data source: PostgreSQL Database")
+            connection_pool.putconn(conn)
 
-if __name__ == "__main__":
-    main()
+# ----------------------------------------------------
+# 5️⃣ LOAD DATA FROM DATABASE
+# ----------------------------------------------------
+st.markdown("### 📦 Loading Data...")
+
+agency_query = """
+SELECT
+    agency_name,
+    trips,
+    cancellations,
+    revenue,
+    commission,
+    growth
+FROM agencies
+ORDER BY revenue DESC
+LIMIT 10;
+"""
+
+agency_performance = run_query(agency_query)
+
+if agency_performance.empty:
+    st.warning("⚠️ No data returned from the database.")
+    st.stop()
+
+st.success("✅ Data loaded successfully!")
+
+# ----------------------------------------------------
+# 6️⃣ SUMMARY METRICS
+# ----------------------------------------------------
+total_revenue = agency_performance["revenue"].sum()
+total_commission = agency_performance["commission"].sum()
+avg_growth = agency_performance["growth"].mean()
+total_trips = agency_performance["trips"].sum()
+
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("💰 Total Revenue", f"{total_revenue:,.0f} TND")
+col2.metric("🏦 Total Commission", f"{total_commission:,.0f} TND")
+col3.metric("📈 Average Growth", f"{avg_growth:.1f}%")
+col4.metric("🚗 Total Trips", f"{total_trips:,}")
+
+# ----------------------------------------------------
+# 7️⃣ PERFORMANCE CHART
+# ----------------------------------------------------
+st.markdown("### 📊 Top 10 Agencies by Revenue")
+
+chart_data = agency_performance[["agency_name", "revenue", "growth"]]
+st.bar_chart(
+    data=chart_data,
+    x="agency_name",
+    y="revenue",
+    use_container_width=True
+)
+
+# ----------------------------------------------------
+# 8️⃣ TOP PERFORMING AGENCIES SECTION
+# ----------------------------------------------------
+st.markdown("### 🥇 Top Performing Agencies")
+
+currency = "TND"
+
+for idx, row in agency_performance.iterrows():
+    with st.container():
+        col1, col2, col3 = st.columns([1, 6, 3])
+
+        with col1:
+            st.markdown(f"### 🏅 #{idx + 1}")
+
+        with col2:
+            st.markdown(f"**{row['agency_name']}**")
+            st.caption(f"{int(row['trips'])} trips | {int(row['cancellations'])} cancellations")
+            progress = min(max(row['growth'], 0) / 25, 1.0)
+            st.progress(progress)
+
+        with col3:
+            st.markdown(f"**{row['revenue']:,.0f} {currency}**")
+            st.caption(f"Commission: {row['commission']:,.0f} {currency}")
+            st.markdown(
+                f"<span style='color: green; font-weight: bold;'>+{row['growth']:.1f}%</span>",
+                unsafe_allow_html=True
+            )
+
+    st.markdown("---")
+
+# ----------------------------------------------------
+# 9️⃣ DEBUG INFO (OPTIONAL)
+# ----------------------------------------------------
+with st.expander("⚙️ Debug Info"):
+    st.write("**Secrets keys found:**", list(st.secrets.keys()))
+    st.json({
+        "host": db_config.get("host"),
+        "port": db_config.get("port"),
+        "database": db_config.get("database"),
+        "user": db_config.get("user"),
+    })
+    st.caption("_Password is hidden for security._")
