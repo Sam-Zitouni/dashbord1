@@ -64,7 +64,7 @@ def init_connection_pool():
             host = "37.187.33.50"
             port = 5432
             database = "postgres"
-            user = "readonly_user"
+            user = "postgres"
             password = "secure_password"
             
 
