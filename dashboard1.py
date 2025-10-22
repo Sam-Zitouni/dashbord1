@@ -61,11 +61,13 @@ def init_connection_pool():
             Please ensure your `.streamlit/secrets.toml` file contains:
             ```toml
             [database]
-            host = "51.178.30.30"
+            host = "37.187.33.50"
             port = 5432
             database = "rawahel_test"
             user = "readonly_user"
-            password = "uJz8o99awc"
+            password = "secure_password"
+            
+
             ```
             """)
             return None
