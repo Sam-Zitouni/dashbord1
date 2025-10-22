@@ -57,37 +57,18 @@ def init_connection_pool():
     try:
         if "database" not in st.secrets:
             st.error("❌ 'database' section not found in secrets.toml")
+            st.info("""
+            Please ensure your `.streamlit/secrets.toml` file contains:
+            ```toml
+            [database]
+            host = "51.178.30.30"
+            port = 5432
+            database = "rawahel_test"
+            user = "readonly_user"
+            password = "uJz8o99awc"
+            ```
+            """)
             return None
-        
-        required_keys = ["host", "port", "database", "user", "password"]
-        missing_keys = [key for key in required_keys if key not in st.secrets["database"]]
-        
-        if missing_keys:
-            st.error(f"❌ Missing keys in secrets.toml: {', '.join(missing_keys)}")
-            return None
-        
-        connection_pool = psycopg2.pool.SimpleConnectionPool(
-            1, 10,
-            host=st.secrets["database"]["host"],
-            port=st.secrets["database"]["port"],
-            database=st.secrets["database"]["database"],
-            user=st.secrets["database"]["user"],
-            password=st.secrets["database"]["password"],
-            connect_timeout=10
-        )
-        
-        if connection_pool:
-            st.success("✅ Database connection pool created successfully")
-            return connection_pool
-            
-    except psycopg2.OperationalError as e:
-        st.error(f"❌ Database connection failed: {str(e)}")
-        st.info("Verify: 1) Database is running, 2) Credentials are correct, 3) Network allows connection")
-        return None
-    except Exception as e:
-        st.error(f"❌ Unexpected error: {str(e)}")
-        st.code(traceback.format_exc())
-        return None
 
 @contextmanager
 def get_db_connection():
